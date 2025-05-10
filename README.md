@@ -6,6 +6,16 @@ SleepGuardian adalah sistem alarm pintar berbasis mikrokontroler ATmega328P yang
 
 ---
 
+## Contributors
+
+Group 4:
+
+- [Adrian Dika Darmawan](https://www.github.com/adriandikad2) - 2306250711
+- [Deandro Najwan Ahmad Syahbanna](https://www.github.com/Deann7) - 2306213174
+- [Dhafin Hamizan Setiawan](https://www.github.com/dhafinhs) - 2306267145
+- [Samih Bassam](https://www.github.com/BlueBerryCakeee) - 2306250623
+- [Ryan Adidaru](https://www.github.com/coolcmyk) - 2306266994
+
 ## 📌 Features
 
 - 🧠 Smart verification to detect sleep state
