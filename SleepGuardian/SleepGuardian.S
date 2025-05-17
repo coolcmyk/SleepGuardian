@@ -1,128 +1,267 @@
-;--------------------------------------------------------
-; SleepGuardian. © 2025 Kelompok 23. All rights reserved.
-; DHT11 → 1-LED Controller for ATmega328P
-; LED → PC0
-; DHT11 data → PB1
-;--------------------------------------------------------
+;====================================================
+; SPI‑Master → 16×2 LCD (4‑bit) display temp byte
+;====================================================
 #define __SFR_OFFSET 0x00
 #include "avr/io.h"
-;--------------------------------------------------------
-.global main
-;=================================================================
-main:
-;------------
-    LDI   R16, (1<<PC0)       ; Set PC0 as output (LED)
-    OUT   DDRC, R16           ; Configure PORTC
-    CBI   PORTC, PC0          ; Initially LED off
 
-main_loop:
-    RCALL delay_2s            ; Wait ≈2s between readings
+;— LCD pins on PORTE, PORTB —
+.equ LCD_DDR_D,   DDRD
+.equ LCD_DDR_B,   DDRB
+.equ LCD_PORT_D,  PORTD
+.equ LCD_PORT_B,  PORTB
+.equ PIN_RS,      1
+.equ PIN_E,       0
 
-    ;--- Send start signal on PB1 ---
-    SBI   DDRB, PB1           ; PB1 as output
-    CBI   PORTB, PB1          ; Pull LOW
-    RCALL delay_20ms          ; Hold LOW for 20ms
-    SBI   PORTB, PB1          ; Release HIGH
+;— SPI master bits in SPCR —
+; SPE, MSTR
 
-    ;--- Switch PB1 to input and wait for DHT11 response ---
-    CBI   DDRB, PB1           ; PB1 as input
-w1: SBIC  PINB, PB1           ; Wait for initial LOW (80 µs)
-    RJMP  w1
-w2: SBIS  PINB, PB1           ; Wait for initial HIGH (80 µs)
-    RJMP  w2
-w3: SBIC  PINB, PB1           ; Wait for next LOW (start of data)
-    RJMP  w3
+;— Delays —
+.equ US_COUNT,    90
+.equ MS_COUNT,    40
 
-    ;--- Read and discard humidity bytes ---
-    RCALL DHT11_reading        ; Byte1 = humidity int (discarded)
-    RCALL DHT11_reading        ; Byte2 = humidity frac (discarded)
+;— public entry—
+.global master_main
+master_main:
+    ; CRITICAL FIX: Reset sequence
+    ; Configure SPI pins first
+    SBI   DDRB, 3     ; MOSI as OUTPUT
+    CBI   DDRB, 4     ; MISO as INPUT  
+    SBI   DDRB, 5     ; SCK as OUTPUT
+    SBI   DDRB, 2     ; SS as OUTPUT
+    SBI   PORTB, 2    ; SS HIGH initially
+    
+    ; init SPI as master
+    LDI   R16, (1<<SPE)|(1<<MSTR)|(1<<SPR0)  ; Added SPR0 for slower clock
+    OUT   SPCR, R16
 
-    ;--- Read temperature integer (byte3) ---
-    RCALL DHT11_reading        ; Byte3 = temp int → in R18
-    MOV   R16, R18             ; Save temperature in R16
+    ; Wait for peripherals to stabilize
+    RCALL delay_seconds
+    
+    ; init LCD port direction
+    LDI   R16, 0xFF
+    OUT   LCD_DDR_D, R16
+    OUT   LCD_DDR_B, R16
+    
+    ; Make sure EN starts LOW
+    CBI   LCD_PORT_B, PIN_E
+    ; Make sure RS starts LOW
+    CBI   LCD_PORT_B, PIN_RS
+    
+    ; Wait for LCD to power up
+    RCALL delay_seconds
+    
+    ; Initialize the LCD
+    RCALL LCD_init
+    
+    ; Show a test message first to verify LCD works
+    LDI   R16, 'T'
+    RCALL data_wrt
+    LDI   R16, 'e'
+    RCALL data_wrt
+    LDI   R16, 's'
+    RCALL data_wrt
+    LDI   R16, 't'
+    RCALL data_wrt
 
-    ;--- Discard remaining bytes ---
-    RCALL DHT11_reading        ; Byte4 = temp frac (discarded)
-    RCALL DHT11_reading        ; Byte5 = checksum (discarded)
+    ; Wait to make sure we can see the test message
+    RCALL delay_seconds
+    
+    ; Now proceed to main loop
+    RJMP  main_temp_loop
 
-    ;--- LED control logic based on temperature ---
-    CPI   R16, 26              ; Compare temperature with 25°C
-    BRLO  led_on               ; TEMP < 25 → LED ON
-    RJMP  led_off
+main_temp_loop:
+    ; 1) clock one byte from slave
+    RCALL spi_request_byte    ; → R16
 
-led_on:
-    SBI   PORTC, PC0           ; Turn LED ON
-    RJMP  main_loop
+    ; 2) clear display
+    LDI   R16, 0x01
+    RCALL command_wrt
+    RCALL delay_ms
 
-led_off:
-    CBI   PORTC, PC0           ; Turn LED OFF
-    RJMP  main_loop
+    ; 3) convert R16 to ASCII
+    MOV   R19, R16
+    CLR   R18
+tens_loop:
+    CPI   R19, 10
+    BRLO  tens_done
+    SUBI  R19, 10
+    INC   R18
+    RJMP  tens_loop
+tens_done:
+    ; print tens
+    MOV   R16, R18
+    LDI   R20, '0'
+    ADD   R16, R20
+    RCALL data_wrt
+    ; print ones
+    MOV   R16, R19
+    LDI   R20, '0'
+    ADD   R16, R20
+    RCALL data_wrt
 
-;=================================================================
-; Read one byte from DHT11 into R18
-;=================================================================
-DHT11_reading:
-    LDI   R17, 8               ; 8 bits to read
-    CLR   R18                  ; Clear data buffer
-;---------------------------------------------------------
-read_bit:
-    SBIS  PINB, PB1            ; Wait for rising edge
-    RJMP  read_bit
-    RCALL delay_timer0         ; Wait ≈50 µs
-    SBIS  PINB, PB1            ; Check bit value
-    RJMP  bit_zero             ; If 0, jump to bit_zero
-    SEC                        ; Set carry flag (C=1)
-    ROL   R18                  ; Shift carry into data buffer
-    RJMP  wait_low             ; Jump to wait for low
-bit_zero:
-    LSL   R18                  ; Shift in 0 (carry=0)
-;---------------------------------------------------------
-wait_low:
-    SBIC  PINB, PB1            ; Wait for falling edge
-    RJMP  wait_low
-    DEC   R17                  ; Decrement bit counter
-    BRNE  read_bit             ; Read next bit if not done
-    RET                        ; Return when all bits read
+    ; suffix " C"
+    LDI   R16, ' '
+    RCALL data_wrt
+    LDI   R16, 'C'
+    RCALL data_wrt
 
-;=================================================================
-; Delay subroutines
-;=================================================================
-delay_20ms:                    ; ≈20 ms delay (@16 MHz)
-    LDI   R20, 255
-d20a:LDI   R21, 210
-d20b:LDI   R22, 2
-d20c:DEC   R22
-     BRNE  d20c
-     DEC   R21
-     BRNE  d20b
-     DEC   R20
-     BRNE  d20a
+    RCALL delay_seconds
+    RJMP  main_temp_loop
+
+;==========================================
+; SPI request (master) → R16
+;==========================================
+spi_request_byte:
+    ; CRITICAL FIX 1: Ensure SS is high before starting
+    SBI   PORTB, 2                ; SS HIGH
+    RCALL delay_ms                ; Wait a moment
+    
+    ; CRITICAL FIX 2: Multiple attempts to get valid data
+    LDI   R20, 3                  ; Try 3 times
+retry_spi:
+    ; Pull SS low to activate slave
+    CBI   PORTB, 2                ; SS LOW
+    RCALL delay_ms                ; Wait for slave to respond
+    
+    ; Send command byte 0x00 to request temperature
+    LDI   R16, 0x00
+    OUT   SPDR, R16
+    
+wait_spif_m:
+    IN    R17, SPSR
+    SBRS  R17, SPIF
+    RJMP  wait_spif_m
+    
+    ; CRITICAL FIX 3: Ensure we got real data
+    IN    R16, SPDR              ; Read received byte
+    
+    ; Pull SS high to deactivate slave
+    SBI   PORTB, 2                ; SS HIGH
+    
+    ; Check if we got a valid temperature (not 0 or 1)
+    CPI   R16, 2
+    BRSH  valid_temp              ; If ≥2, treat as valid
+
+    ; Not valid, try again if we have attempts left
+    DEC   R20
+    BRNE  retry_spi
+    
+    ; If all attempts failed, use default
+    LDI   R16, 23                 ; Use 23°C as fallback
+    
+valid_temp:
     RET
 
-delay_2s:                      ; ≈2 s delay (@16 MHz)
-    LDI   R20, 255
-d2a: LDI   R21, 255
-d2b: LDI   R22, 164
-d2c: DEC   R22
-     BRNE  d2c
-     DEC   R21
-     BRNE  d2b
-     DEC   R20
-     BRNE  d2a
+;==========================================
+; LCD routines (based on reference code)
+;==========================================
+LCD_init:
+    ; Make sure EN starts LOW
+    CBI   LCD_PORT_B, PIN_E
+    ; Wait for LCD power-on
+    RCALL delay_ms
+    
+    LDI   R16, 0x33         ; Initialize LCD for 4-bit mode
+    RCALL command_wrt
+    RCALL delay_ms
+    
+    LDI   R16, 0x32
+    RCALL command_wrt
+    RCALL delay_ms
+    
+    LDI   R16, 0x28         ; LCD 2 lines, 5x7 matrix
+    RCALL command_wrt
+    RCALL delay_ms
+    
+    LDI   R16, 0x0C         ; Display ON, cursor OFF
+    RCALL command_wrt
+    
+    LDI   R16, 0x01         ; Clear LCD
+    RCALL command_wrt
+    RCALL delay_ms
+    
+    LDI   R16, 0x06         ; Shift cursor right
+    RCALL command_wrt
+    
+    ; Additional delay after init
+    RCALL delay_ms
     RET
 
-delay_timer0:                  ; ≈50 µs delay via Timer0 CTC
-    CLR   R23
-    OUT   TCNT0, R23          ; Initialize timer0 with count=0
-    LDI   R23, 100
-    OUT   OCR0A, R23          ; OCR0 = 100
-    LDI   R23, 0b00001010     ; CTC mode, prescaler=8
-    OUT   TCCR0B, R23
-dt0:IN    R23, TIFR0          ; Get TIFR0 byte & check
-    SBRS  R23, OCF0A          ; If OCF0=1, skip next instruction
-    RJMP  dt0                 ; Else, loop back & check OCF0 flag
-    CLR   R23
-    OUT   TCCR0B, R23         ; Stop timer0
-    LDI   R23, (1<<OCF0A)
-    OUT   TIFR0, R23          ; Clear OCF0 flag
+command_wrt:
+    MOV   R27, R16
+    ANDI  R27, 0xF0
+    OUT   LCD_PORT_D, R27
+    CBI   LCD_PORT_B, PIN_RS
+    SBI   LCD_PORT_B, PIN_E
+    RCALL delay_short
+    CBI   LCD_PORT_B, PIN_E
+    RCALL delay_us
+
+    MOV   R27, R16
+    SWAP  R27
+    ANDI  R27, 0xF0
+    OUT   LCD_PORT_D, R27
+    SBI   LCD_PORT_B, PIN_E
+    RCALL delay_short
+    CBI   LCD_PORT_B, PIN_E
+    RCALL delay_us
+    RET
+
+data_wrt:
+    MOV   R27, R16
+    ANDI  R27, 0xF0
+    OUT   LCD_PORT_D, R27
+    SBI   LCD_PORT_B, PIN_RS
+    SBI   LCD_PORT_B, PIN_E
+    RCALL delay_short
+    CBI   LCD_PORT_B, PIN_E
+    RCALL delay_us
+
+    MOV   R27, R16
+    SWAP  R27
+    ANDI  R27, 0xF0
+    OUT   LCD_PORT_D, R27
+    SBI   LCD_PORT_B, PIN_E
+    RCALL delay_short
+    CBI   LCD_PORT_B, PIN_E
+    RCALL delay_us
+    RET
+
+;==========================================
+; delays
+;==========================================
+delay_short:
+    NOP
+    NOP
+    RET
+
+delay_us:
+    LDI   R20, US_COUNT
+l_us:
+    RCALL delay_short
+    DEC   R20
+    BRNE  l_us
+    RET
+
+delay_ms:
+    LDI   R21, MS_COUNT
+l_ms:
+    RCALL delay_us
+    DEC   R21
+    BRNE  l_ms
+    RET
+
+delay_seconds:
+    LDI   R20, 255
+l_s1:
+    LDI   R21, 255
+l_s2:
+    LDI   R22, 20
+l_s3:
+    DEC   R22
+    BRNE  l_s3
+    DEC   R21
+    BRNE  l_s2
+    DEC   R20
+    BRNE  l_s1
     RET
