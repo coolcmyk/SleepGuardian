@@ -138,18 +138,29 @@ wait_spif_m:
     ; Pull SS high to deactivate slave
     SBI   PORTB, 2                ; SS HIGH
     
-    ; Check if we got a valid temperature (not 0 or 1)
-    CPI   R16, 2
-    BRSH  valid_temp              ; If ≥2, treat as valid
-
+    ; ENHANCED CORRECTION: Quadruple value (double twice)
+    ; First doubling
+    MOV   R17, R16              ; Copy value to R17
+    ADD   R16, R17              ; Add to itself (multiply by 2)
+    
+    ; Second doubling for greater correction
+    MOV   R17, R16              ; Copy doubled value to R17
+    ADD   R16, R17              ; Add to itself again (now multiplied by 4)
+    
+    ; Check if we got a valid temperature (not 0)
+    CPI   R16, 8                ; Now checking for quadrupled values
+    BRSH  valid_temp            ; If ≥8, treat as valid
+    
     ; Not valid, try again if we have attempts left
     DEC   R20
     BRNE  retry_spi
     
     ; If all attempts failed, use default
-    LDI   R16, 23                 ; Use 23°C as fallback
+    LDI   R16, 92               ; Use 92°C as fallback (46×2)
     
 valid_temp:
+    ; Final adjustment - now divide by 2 to get proper range
+    LSR   R16                   ; Logical shift right (divide by 2)
     RET
 
 ;==========================================
