@@ -22,6 +22,10 @@ msg_error:      .asciz "Error reading DHT11"
 ; MAIN ROUTINE
 ;============================================================
 slave_main:
+    ; Initialize Timer0 for precise delays
+    LDI     R16, (1<<WGM01)      ; CTC mode
+    OUT     TCCR0A, R16
+
     ; Setup I/O pins
     LDI     R16, (1 << PC0)
     OUT     DDRC, R16            ; Set PC0 (LED) as output
@@ -39,32 +43,51 @@ main_loop:
     RCALL   delay_2s             ; ≈2s delay between readings
 
     ; --- DHT11 Start Signal ---
-    SBI     DDRB, PB1            ; Set PB1 as output
-    CBI     PORTB, PB1           ; Pull LOW
+    SBI     DDRB, 1              ; Set PB1 as output
+    CBI     PORTB, 1             ; Pull LOW
     RCALL   delay_20ms           ; Wait 20ms
-    SBI     PORTB, PB1           ; Release HIGH
-
+    SBI     PORTB, 1             ; Release HIGH
+    
+    ; Short delay before switching to input
+    NOP
+    NOP
+    NOP
+    
     ; --- Wait for DHT11 Response ---
-    CBI     DDRB, PB1            ; PB1 as input
+    CBI     DDRB, 1              ; PB1 as input
+    
+    ; Enable pull-up resistor (CRITICAL FIX!)
+    SBI     PORTB, 1             ; Enable pull-up on PB1
+    
 wait_resp_low:
-    SBIC    PINB, PB1
-    RJMP    wait_resp_low
-
+    SBIC    PINB, 1
+    RJMP    wait_resp_low        ; Wait for DHT11 low pulse
+    
 wait_resp_high:
-    SBIS    PINB, PB1
-    RJMP    wait_resp_high
-
+    SBIS    PINB, 1
+    RJMP    wait_resp_high       ; Wait for DHT11 high pulse
+    
 wait_data_start:
-    SBIC    PINB, PB1
-    RJMP    wait_data_start
+    SBIC    PINB, 1
+    RJMP    wait_data_start      ; Wait for DHT11 low pulse again
+    
+    ; Blink LED to indicate start of reading
+    SBI     PORTC, PC0
+    RCALL   delay_50us
+    CBI     PORTC, PC0
 
     ; --- Read Data from DHT11 ---
-    RCALL   DHT11_read_byte       ; Humidity int (discard)
+    RCALL   DHT11_read_byte       ; Humidity int - store in R19
+    MOV     R19, R18
     RCALL   DHT11_read_byte       ; Humidity frac (discard)
-    RCALL   DHT11_read_byte       ; Temperature int → R18
+    RCALL   DHT11_read_byte       ; Temperature int → R18  
     MOV     R17, R18              ; Store temp in R17
-    RCALL   DHT11_read_byte       ; Temperature frac (discard)
-    RCALL   DHT11_read_byte       ; Checksum (discard)
+    
+    ; Only proceed if reading looks valid
+    CPI     R17, 0
+    BREQ    reading_error
+    CPI     R17, 80              ; Check if temp is reasonable (<80°C)
+    BRSH    reading_error
 
     ; Debugging: After reading temperature
     LDI     R30, lo8(msg_success)
@@ -129,61 +152,86 @@ skip_value_fix:
     ; Go back to main loop for next temp reading
     RJMP    main_loop
 
+reading_error:
+    ; Debug message for error
+    LDI     R30, lo8(msg_error)
+    LDI     R31, hi8(msg_error)
+    CALL    printDebug
+    
+    ; Flash LED rapidly to indicate error
+    LDI     R20, 5               ; Flash 5 times
+error_flash:
+    SBI     PORTC, PC0           ; LED ON
+    RCALL   delay_50us
+    CBI     PORTC, PC0           ; LED OFF
+    RCALL   delay_50us
+    DEC     R20
+    BRNE    error_flash
+    
+    ; Use previous value or default
+    LDI     R17, 23              ; Default to 23°C only on error
+    
+    RJMP    update_temp_for_spi
+
 ;============================================================
 ; DHT11_read_byte - Reads 1 byte from DHT11 into R18
+; Using reference implementation approach
 ;============================================================
 DHT11_read_byte:
-    LDI     R17, 8                ; Bit counter
-    CLR     R18                   ; Clear R18
-
-read_bit:
-    ; Wait for rising edge
-wait_rise:
-    SBIS    PINB, PB1
-    RJMP    wait_rise
-
-    RCALL   delay_50us           ; Wait ~50µs
-
-    ; Read bit: HIGH → 1, LOW → 0
-    SBIS    PINB, PB1
-    RJMP    bit_is_zero
-
-    SEC                          ; Set Carry = 1
-    ROL     R18                  ; Shift into R18
-    RJMP    wait_fall
-
-bit_is_zero:
-    LSL     R18                  ; Shift 0 into R18
-
-wait_fall:
-    SBIC    PINB, PB1
-    RJMP    wait_fall
-
-    DEC     R17
-    BRNE    read_bit
+    LDI   R17, 8        ; Set counter for receiving 8 bits
+    CLR   R18           ; Clear data register
+    
+bit_loop:
+    ; Wait for rising edge (start of bit)
+wait_bit_rise:
+    SBIS  PINB, PB1     ; Skip if PB1 is high
+    RJMP  wait_bit_rise ; Loop until PB1 becomes high
+    
+    ; Wait 50us then check if bit is still high (1) or low (0)
+    RCALL delay_50us
+    
+    ; If pin is still high after 50us, it's a 1 bit
+    SBIS  PINB, PB1     ; Skip if PB1 is high (1 bit)
+    RJMP  zero_bit      ; PB1 is low = 0 bit
+    
+    ; Process 1 bit
+    SEC                 ; Set carry flag (C=1)
+    ROL   R18           ; Shift carry (1) into LSB
+    RJMP  wait_bit_fall
+    
+zero_bit:
+    LSL   R18           ; Shift 0 into LSB
+    
+wait_bit_fall:
+    ; Wait for falling edge (end of bit)
+    SBIC  PINB, PB1     ; Skip if PB1 is low
+    RJMP  wait_bit_fall ; Loop until PB1 becomes low
+    
+    DEC   R17           ; Decrement bit counter
+    BRNE  bit_loop      ; Continue until all 8 bits read
     RET
 
 ;============================================================
 ; Delay ~50 µs via Timer0 CTC Mode
 ;============================================================
 delay_50us:
-    CLR     R23
-    OUT     TCNT0, R23           ; Reset counter
-    LDI     R23, 100
-    OUT     OCR0A, R23           ; Compare value
-    LDI     R23, 0b00001010      ; CTC mode, prescaler = 8
-    OUT     TCCR0B, R23
-
-wait_ctc:
-    IN      R23, TIFR0
-    SBRS    R23, OCF0A
-    RJMP    wait_ctc
-
-    ; Stop Timer0 and clear flag
-    CLR     R23
-    OUT     TCCR0B, R23
-    LDI     R23, (1 << OCF0A)
-    OUT     TIFR0, R23
+    CLR     R20
+    OUT     TCNT0, R20           ; Initialize timer0 with count=0
+    LDI     R20, 100
+    OUT     OCR0A, R20           ; OCR0A = 100
+    LDI     R20, 0b00001010      ; CTC mode, prescaler 8
+    OUT     TCCR0B, R20
+    
+wait_timer0:
+    IN      R20, TIFR0           ; Get TIFR0 byte & check
+    SBRS    R20, OCF0A           ; Skip if OCF0A=1 (compare match)
+    RJMP    wait_timer0          ; Keep checking
+    
+    CLR     R20
+    OUT     TCCR0B, R20          ; Stop Timer0
+    
+    LDI     R20, (1<<OCF0A)
+    OUT     TIFR0, R20           ; Clear OCF0A flag
     RET
 
 ;============================================================

@@ -67,6 +67,38 @@ void printValue(const char* label, int value) {
   }
 }
 
+void checkDHT11Connection() {
+  // Check DHT11 data pin connection
+  pinMode(9, INPUT_PULLUP);  // PB1 = Digital pin 9
+  delay(10);
+  
+  bool pinState = digitalRead(9);
+  Serial.print("DHT11 data pin state: ");
+  Serial.println(pinState ? "HIGH (good)" : "LOW (possible short)");
+  
+  // Perform quick communication test
+  pinMode(9, OUTPUT);
+  digitalWrite(9, LOW);
+  delay(20);
+  digitalWrite(9, HIGH);
+  pinMode(9, INPUT_PULLUP);
+  
+  // Check for response
+  unsigned long startTime = millis();
+  bool responseDetected = false;
+  
+  // Wait for response for up to 100ms
+  while (millis() - startTime < 100) {
+    if (digitalRead(9) == LOW) {
+      responseDetected = true;
+      break;
+    }
+  }
+  
+  Serial.print("DHT11 response: ");
+  Serial.println(responseDetected ? "Detected (good)" : "None (check wiring)");
+}
+
 void setup() {
   // Initialize serial communication for Virtual Terminal
   Serial.begin(9600);
@@ -99,6 +131,9 @@ void setup() {
   // Show terminal operation instructions  
   Serial.println("Starting sensor readings...");
   Serial.println("Temperatures will be displayed below:");
+  
+  // Check DHT11 connection
+  checkDHT11Connection();
   
   // Call assembly main function (blocking function)
   slave_main();
