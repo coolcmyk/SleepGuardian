@@ -79,7 +79,7 @@ wait_data_start:
     ; --- Read Data from DHT11 ---
     RCALL   DHT11_read_byte       ; Humidity int - store in R19
     MOV     R19, R18
-    RCALL   DHT11_read_byte       ; Humidity frac (discard)
+    RCALL   DHT11_read_byte       ;  Humidity frac (discard)
     RCALL   DHT11_read_byte       ; Temperature int → R18  
     MOV     R17, R18              ; Store temp in R17
     
